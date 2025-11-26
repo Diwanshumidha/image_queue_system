@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"log"
 	"mime/multipart"
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/gin-contrib/cors"
@@ -67,6 +70,34 @@ func isAllowedImage(file multipart.File) (bool, error) {
 	return false, nil
 }
 
+type KeyResponse struct {
+	Key string `json:"key"`
+	Id  string `json:"id"`
+	Ext string `json:"ext"`
+}
+
+func generateKey(filename string) (KeyResponse, error) {
+	filename = strings.TrimSpace(filename)
+	if filename == "" {
+		return KeyResponse{}, errors.New("filename is required")
+	}
+
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(filename), "."))
+	if ext == "" {
+		return KeyResponse{}, errors.New("filename must contain an extension")
+	}
+
+	id := strings.ToLower(uuid.New().String())
+
+	key := fmt.Sprintf("uploads/raw/%s.%s", id, ext)
+
+	return KeyResponse{
+		Key: key,
+		Id:  id,
+		Ext: ext,
+	}, nil
+}
+
 func uploadHandler(c *gin.Context) {
 	// This is just for demo purposes, in real application there will be actual authentication
 	userId := c.GetHeader("X-User-Id")
@@ -94,19 +125,22 @@ func uploadHandler(c *gin.Context) {
 
 	defer file.Close()
 
-	id := uuid.New().String()
-	key := "uploads/raw/" + id + "." + strings.Split(fileHeader.Filename, ".")[1]
+	keyResponse, err := generateKey(fileHeader.Filename)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "generateKey failed", "details": err.Error()})
+		return
+	}
 
 	_, err = uploader.Upload(c, &s3.PutObjectInput{
 		Bucket: aws.String(s3_internal.Bucket),
-		Key:    aws.String(key),
+		Key:    aws.String(keyResponse.Key),
 		Body:   file,
 		Metadata: map[string]string{
 			"ContentType":   fileHeader.Header.Get("Content-Type"),
 			"FileName":      fileHeader.Filename,
-			"FileExtension": strings.Split(fileHeader.Filename, ".")[1],
+			"FileExtension": keyResponse.Ext,
 			"UserId":        userId,
-			"id":            id,
+			"id":            keyResponse.Id,
 		},
 	})
 	if err != nil {
@@ -116,7 +150,8 @@ func uploadHandler(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "uploaded",
-		"key":     key,
+		"key":     keyResponse.Key,
+		"id":      keyResponse.Id,
 	})
 }
 
