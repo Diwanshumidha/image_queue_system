@@ -14,6 +14,7 @@ import (
 	s3_internal "diwanshuMidha/common/lib/s3"
 	"diwanshuMidha/queue"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	s3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
@@ -97,8 +98,8 @@ func uploadHandler(c *gin.Context) {
 	key := "uploads/raw/" + id + "." + strings.Split(fileHeader.Filename, ".")[1]
 
 	_, err = uploader.Upload(c, &s3.PutObjectInput{
-		Bucket: &[]string{s3_internal.Bucket}[0],
-		Key:    &key,
+		Bucket: aws.String(s3_internal.Bucket),
+		Key:    aws.String(key),
 		Body:   file,
 		Metadata: map[string]string{
 			"ContentType":   fileHeader.Header.Get("Content-Type"),
