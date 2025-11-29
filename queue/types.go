@@ -11,3 +11,6 @@ type RabbitClient struct {
 	conn *amqp.Connection
 	ch   *amqp.Channel
 }
+
+type Table = amqp.Table
+type Delivery = amqp.Delivery

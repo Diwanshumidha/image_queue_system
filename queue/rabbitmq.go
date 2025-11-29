@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 
 	amqp "github.com/rabbitmq/amqp091-go"
@@ -55,6 +56,7 @@ func (c *RabbitClient) declareTopology() error {
 		false, // no-wait
 		nil,   // arguments
 	)
+
 	if err != nil {
 		return fmt.Errorf("failed to declare DLQ: %w", err)
 	}
@@ -64,21 +66,32 @@ func (c *RabbitClient) declareTopology() error {
 		"x-dead-letter-routing-key": DeadLetterQueue,
 	}
 
-	_, err = c.ch.QueueDeclare(MetadataQueue, true, false, false, false, args)
-	if err != nil {
-		return fmt.Errorf("failed to declare metadata queue: %w", err)
-	}
-
 	_, err = c.ch.QueueDeclare(TranscodeQueue, true, false, false, false, args)
 	if err != nil {
 		return fmt.Errorf("failed to declare transcode queue: %w", err)
 	}
 
-	if err = c.ch.QueueBind(MetadataQueue, BindingKey, ExchangeName, false, nil); err != nil {
-		return fmt.Errorf("failed to bind metadata queue: %w", err)
-	}
 	if err = c.ch.QueueBind(TranscodeQueue, BindingKey, ExchangeName, false, nil); err != nil {
 		return fmt.Errorf("failed to bind transcode queue: %w", err)
+	}
+
+	retryQueueArgs := amqp.Table{
+		"x-dead-letter-exchange":    "",
+		"x-dead-letter-routing-key": TranscodeQueue,
+		"x-message-ttl":             int32(5000), // 5s delay
+	}
+
+	_, err = c.ch.QueueDeclare(
+		TranscodeRetryQueue,
+		true,
+		false,
+		false,
+		false,
+		retryQueueArgs,
+	)
+
+	if err != nil {
+		return fmt.Errorf("failed to declare retry queue: %w", err)
 	}
 
 	return nil
@@ -100,6 +113,9 @@ func (c *RabbitClient) PublishEvent(event ImageEvent) error {
 			DeliveryMode: amqp.Persistent,
 			Timestamp:    time.Now(),
 			Body:         body,
+			Headers: amqp.Table{
+				"x-retries": 3,
+			},
 		},
 	)
 	if err != nil {
@@ -113,9 +129,9 @@ func (c *RabbitClient) PublishEvent(event ImageEvent) error {
 func (c *RabbitClient) Consume(queueName string) (<-chan amqp.Delivery, error) {
 	switch queueName {
 	case TranscodeQueue:
-		c.ch.Qos(1, 0, false)
-	case MetadataQueue:
-		c.ch.Qos(5, 0, false)
+		if err := c.ch.Qos(1, 0, false); err != nil {
+			return nil, fmt.Errorf("failed to set QoS: %w", err)
+		}
 	default:
 		return nil, fmt.Errorf("unknown queue: %s", queueName)
 	}
@@ -135,6 +151,71 @@ func (c *RabbitClient) Consume(queueName string) (<-chan amqp.Delivery, error) {
 
 	log.Printf("Consumer registered for queue: %s", queueName)
 	return msgs, nil
+}
+
+func getRetryCount(headers amqp.Table, key string) int {
+	v, ok := headers[key]
+	if !ok || v == nil {
+		return 0
+	}
+
+	switch val := v.(type) {
+	case int:
+		return val
+	case int32:
+		return int(val)
+	case int64:
+		return int(val)
+	case float64:
+		return int(val)
+	case float32:
+		return int(val)
+	case string:
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+
+	return 0
+}
+
+func (c *RabbitClient) Retry(msg *amqp.Delivery) {
+	headers := msg.Headers
+	if headers == nil {
+		headers = amqp.Table{}
+	}
+
+	retries := getRetryCount(headers, "x-retries")
+
+	newCount := retries - 1
+
+	if newCount <= 0 {
+		log.Println("Retried it max times. Forwarding message to DLQ")
+		msg.Nack(false, false)
+		return
+	}
+
+	headers["x-retries"] = newCount
+
+	err := c.ch.Publish(
+		"", // default exchange
+		TranscodeRetryQueue,
+		false,
+		false,
+		amqp.Publishing{
+			Headers:      headers,
+			ContentType:  msg.ContentType,
+			DeliveryMode: amqp.Persistent,
+			Timestamp:    time.Now(),
+			Body:         msg.Body,
+		})
+
+	if err != nil {
+		log.Printf("Failed to publish to retry queue: %v. Nacking message.", err)
+		msg.Nack(false, false)
+		return
+	}
+	msg.Ack(false)
 }
 
 func (c *RabbitClient) Close() {

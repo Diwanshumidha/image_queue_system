@@ -1,0 +1,61 @@
+version: "3.9"
+
+networks:
+  localnet:
+
+services:
+  dev:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspace:cached
+    command: sleep infinity
+    depends_on:
+      - minio
+      - rabbitmq
+    networks:
+      - localnet
+    ports:
+      - "3000:3000" 
+      - "5173:5173" 
+    environment:
+      # Service URLs accessible inside the container
+      MINIO_URL: http://minio:9000
+      MINIO_CONSOLE_URL: http://minio:9001
+      RABBITMQ_URL: amqp://admin:admin123@rabbitmq:5672/
+      RABBITMQ_MANAGEMENT_URL: http://rabbitmq:15672
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin123
+
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - localnet
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: admin
+      RABBITMQ_DEFAULT_PASS: admin123
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - localnet
+
+volumes:
+  minio_data:
+  rabbitmq_data:
